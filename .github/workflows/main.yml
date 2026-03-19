@@ -1,0 +1,68 @@
+name: ReelsBot — Generate Daily Reel
+
+on:
+  schedule:
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+
+jobs:
+  generate-reel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install FFmpeg
+        run: sudo apt-get install -y ffmpeg
+
+      - name: Download font
+        run: |
+          curl -fsSL \
+            "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Bold.ttf" \
+            -o /tmp/Montserrat-Bold.ttf
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write Google credentials
+        run: echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > service_account.json
+
+      - name: Run ReelsBot pipeline
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: service_account.json
+          GOOGLE_CLOUD_PROJECT: sixth-utility-383712
+          GOOGLE_CLOUD_LOCATION: us-central1
+          SHEETS_ID: 18c3HSNWF75HHohUUlGhZMSo_cceLE9TJ0B_1nRUR3xE
+          SHEETS_MODE: public
+          GEMINI_MODEL: gemini-2.5-flash-lite
+          VEO_MODEL: veo-2.0-generate-001
+          TTS_VOICE: en-US-Neural2-F
+          OUTPUT_DIR: /tmp/reelsbot_output
+          DB_PATH: pipeline.db
+          FONT_PATH: /tmp/Montserrat-Bold.ttf
+        run: python main.py
+
+      - name: Upload Reel artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reel-${{ github.run_number }}-${{ github.run_attempt }}
+          path: output/
+          retention-days: 30
+
+      - name: Save used-stories database
+        if: success()
+        run: |
+          git config user.name "ReelsBot"
+          git config user.email "reelsbot@users.noreply.github.com"
+          git add pipeline.db || true
+          git diff --staged --quiet || git commit -m "chore: mark story as used [skip ci]"
+          git push || true
