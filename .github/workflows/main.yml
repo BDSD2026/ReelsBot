@@ -45,7 +45,7 @@ jobs:
           SHEETS_ID: 18c3HSNWF75HHohUUlGhZMSo_cceLE9TJ0B_1nRUR3xE
           SHEETS_MODE: public
           GEMINI_MODEL: gemini-2.5-flash-lite
-          VEO_MODEL: veo-2.0-generate-001
+          VEO_MODEL: veo-3.0-fast-generate-001
           TTS_VOICE: en-US-Neural2-F
           OUTPUT_DIR: /tmp/reelsbot_output
           DB_PATH: pipeline.db
