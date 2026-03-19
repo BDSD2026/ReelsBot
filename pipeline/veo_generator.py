@@ -84,11 +84,53 @@ class VeoGenerator:
         log.info("    Operation: %s", operation_name)
         return self._poll_operation(operation_name)
 
-    def _poll_operation(self, operation_name: str, max_wait: int = 600) -> bytes:
+   def _poll_operation(self, operation_name: str, max_wait: int = 600) -> bytes:
+        # Strip the full path to just get the operation ID
+        # operation_name looks like: projects/.../models/.../operations/OPERATION_ID
+        op_id = operation_name.split("/operations/")[-1]
+        project = config.GOOGLE_CLOUD_PROJECT
         location = config.GOOGLE_CLOUD_LOCATION
-        poll_url = f"https://aiplatform.googleapis.com/v1/{operation_name}"
+
+        poll_url = (
+            f"https://{location}-aiplatform.googleapis.com/v1/"
+            f"projects/{project}/locations/{location}/operations/{op_id}"
+        )
+
         deadline = time.time() + max_wait
         interval = 15
+
+        while time.time() < deadline:
+            time.sleep(interval)
+            token = self._get_token()
+            resp = requests.get(poll_url,
+                                headers={"Authorization": f"Bearer {token}"},
+                                timeout=15)
+            log.info("    Poll status: %s", resp.status_code)
+            if resp.status_code == 404:
+                # Try alternate poll URL format
+                poll_url = f"https://{location}-aiplatform.googleapis.com/v1/{operation_name}"
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            log.info("    done=%s", data.get("done"))
+
+            if data.get("done"):
+                if "error" in data:
+                    raise RuntimeError(f"Veo failed: {data['error']}")
+                response = data.get("response", {})
+                samples = response.get("generateVideoResponse", {}).get("generatedSamples", [])
+                if samples:
+                    video = samples[0].get("video", {})
+                    if video.get("bytesBase64Encoded"):
+                        return base64.b64decode(video["bytesBase64Encoded"])
+                    if video.get("uri"):
+                        return self._download_gcs(video["uri"])
+                log.error("Unexpected response: %s", str(data)[:500])
+                raise RuntimeError("Could not extract video from Veo response")
+
+            interval = min(interval + 10, 30)
+
+        raise TimeoutError(f"Veo timed out after {max_wait}s")
 
         while time.time() < deadline:
             time.sleep(interval)
