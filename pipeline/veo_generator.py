@@ -15,7 +15,7 @@ class VeoGenerator:
     def __init__(self):
         os.makedirs(f"{config.OUTPUT_DIR}/videos", exist_ok=True)
 
-    def generate_all_parts(self, script: dict, story_id: str) -> list[str]:
+    def generate_all_parts(self, script, story_id):
         video_paths = []
         last_frame_b64 = None
         for part in script["parts"]:
@@ -31,14 +31,14 @@ class VeoGenerator:
             video_paths.append(out_path)
         return video_paths
 
-    def _get_token(self) -> str:
+    def _get_token(self):
         creds, _ = google.auth.default(
             scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
         creds.refresh(google.auth.transport.requests.Request())
         return creds.token
 
-    def _generate_clip(self, prompt: str, last_frame_b64: str = None) -> bytes:
+    def _generate_clip(self, prompt, last_frame_b64=None):
         token = self._get_token()
         project = config.GOOGLE_CLOUD_PROJECT
         location = config.GOOGLE_CLOUD_LOCATION
@@ -75,41 +75,31 @@ class VeoGenerator:
         log.info("    Submitting Veo request...")
         resp = requests.post(url, json=body, headers=headers, timeout=30)
         if not resp.ok:
-            log.error("Veo submit error %s: %s", resp.status_code, resp.text[:500])
+            log.error("Veo error %s: %s", resp.status_code, resp.text[:500])
         resp.raise_for_status()
         operation_name = resp.json()["name"]
         log.info("    Operation: %s", operation_name)
         return self._poll_operation(operation_name)
 
-    def _poll_operation(self, operation_name: str, max_wait: int = 600) -> bytes:
-        op_id = operation_name.split("/operations/")[-1]
-        project = config.GOOGLE_CLOUD_PROJECT
+    def _poll_operation(self, operation_name, max_wait=600):
         location = config.GOOGLE_CLOUD_LOCATION
-
-        poll_url = (
-            f"https://{location}-aiplatform.googleapis.com/v1/"
-            f"projects/{project}/locations/{location}/operations/{op_id}"
-        )
+        poll_url = f"https://{location}-aiplatform.googleapis.com/v1/{operation_name}"
+        log.info("    Poll URL: %s", poll_url)
 
         deadline = time.time() + max_wait
         interval = 15
-        tried_alternate = False
 
         while time.time() < deadline:
             time.sleep(interval)
             token = self._get_token()
-            headers = {"Authorization": f"Bearer {token}"}
-            resp = requests.get(poll_url, headers=headers, timeout=15)
+            resp = requests.get(
+                poll_url,
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=15
+            )
             log.info("    Poll status: %s", resp.status_code)
-
-            if resp.status_code == 404 and not tried_alternate:
-                tried_alternate = True
-                poll_url = (
-                    f"https://{location}-aiplatform.googleapis.com/v1/{operation_name}"
-                )
-                log.info("    Switching to alternate poll URL")
-                continue
-
+            if not resp.ok:
+                log.error("Poll error: %s", resp.text[:300])
             resp.raise_for_status()
             data = resp.json()
             log.info("    done=%s", data.get("done"))
@@ -117,8 +107,8 @@ class VeoGenerator:
             if data.get("done"):
                 if "error" in data:
                     raise RuntimeError(f"Veo failed: {data['error']}")
-
                 response = data.get("response", {})
+                log.info("    Response keys: %s", list(response.keys()))
                 samples = response.get("generateVideoResponse", {}).get("generatedSamples", [])
                 if samples:
                     video = samples[0].get("video", {})
@@ -126,24 +116,27 @@ class VeoGenerator:
                         return base64.b64decode(video["bytesBase64Encoded"])
                     if video.get("uri"):
                         return self._download_gcs(video["uri"])
-
-                log.error("Unexpected response: %s", str(data)[:500])
+                log.error("Full response: %s", str(data)[:1000])
                 raise RuntimeError("Could not extract video from Veo response")
 
             interval = min(interval + 10, 30)
 
         raise TimeoutError(f"Veo timed out after {max_wait}s")
 
-    def _download_gcs(self, gcs_uri: str) -> bytes:
+    def _download_gcs(self, gcs_uri):
         path = gcs_uri.replace("gs://", "")
         bucket, obj = path.split("/", 1)
         url = f"https://storage.googleapis.com/{bucket}/{obj}"
         token = self._get_token()
-        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=120)
+        resp = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=120
+        )
         resp.raise_for_status()
         return resp.content
 
-    def _extract_last_frame_b64(self, video_path: str):
+    def _extract_last_frame_b64(self, video_path):
         tmp_path = None
         try:
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
