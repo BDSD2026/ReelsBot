@@ -86,7 +86,7 @@ class VeoGenerator:
 
     def _poll_operation(self, operation_name: str, max_wait: int = 600) -> bytes:
         location = config.GOOGLE_CLOUD_LOCATION
-        poll_url = f"https://{location}-aiplatform.googleapis.com/v1/{operation_name}"
+        poll_url = f"https://aiplatform.googleapis.com/v1/{operation_name}"
         deadline = time.time() + max_wait
         interval = 15
 
