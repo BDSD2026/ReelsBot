@@ -1,6 +1,3 @@
-"""
-Veo Video Generator — Vertex AI Veo 3 Fast via REST API
-"""
 import os, time, base64, logging, requests, subprocess, tempfile
 import google.auth, google.auth.transport.requests
 from utils.config import config
@@ -65,3 +62,104 @@ class VeoGenerator:
                 "aspectRatio": config.VEO_ASPECT_RATIO,
                 "durationSeconds": config.VEO_DURATION,
                 "sampleCount": 1,
+                "enhancePrompt": True,
+                "personGeneration": "allow_adult",
+            },
+        }
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+
+        log.info("    Submitting Veo request...")
+        resp = requests.post(url, json=body, headers=headers, timeout=30)
+        if not resp.ok:
+            log.error("Veo submit error %s: %s", resp.status_code, resp.text[:500])
+        resp.raise_for_status()
+        operation_name = resp.json()["name"]
+        log.info("    Operation: %s", operation_name)
+        return self._poll_operation(operation_name)
+
+    def _poll_operation(self, operation_name: str, max_wait: int = 600) -> bytes:
+        op_id = operation_name.split("/operations/")[-1]
+        project = config.GOOGLE_CLOUD_PROJECT
+        location = config.GOOGLE_CLOUD_LOCATION
+
+        poll_url = (
+            f"https://{location}-aiplatform.googleapis.com/v1/"
+            f"projects/{project}/locations/{location}/operations/{op_id}"
+        )
+
+        deadline = time.time() + max_wait
+        interval = 15
+        tried_alternate = False
+
+        while time.time() < deadline:
+            time.sleep(interval)
+            token = self._get_token()
+            headers = {"Authorization": f"Bearer {token}"}
+            resp = requests.get(poll_url, headers=headers, timeout=15)
+            log.info("    Poll status: %s", resp.status_code)
+
+            if resp.status_code == 404 and not tried_alternate:
+                tried_alternate = True
+                poll_url = (
+                    f"https://{location}-aiplatform.googleapis.com/v1/{operation_name}"
+                )
+                log.info("    Switching to alternate poll URL")
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+            log.info("    done=%s", data.get("done"))
+
+            if data.get("done"):
+                if "error" in data:
+                    raise RuntimeError(f"Veo failed: {data['error']}")
+
+                response = data.get("response", {})
+                samples = response.get("generateVideoResponse", {}).get("generatedSamples", [])
+                if samples:
+                    video = samples[0].get("video", {})
+                    if video.get("bytesBase64Encoded"):
+                        return base64.b64decode(video["bytesBase64Encoded"])
+                    if video.get("uri"):
+                        return self._download_gcs(video["uri"])
+
+                log.error("Unexpected response: %s", str(data)[:500])
+                raise RuntimeError("Could not extract video from Veo response")
+
+            interval = min(interval + 10, 30)
+
+        raise TimeoutError(f"Veo timed out after {max_wait}s")
+
+    def _download_gcs(self, gcs_uri: str) -> bytes:
+        path = gcs_uri.replace("gs://", "")
+        bucket, obj = path.split("/", 1)
+        url = f"https://storage.googleapis.com/{bucket}/{obj}"
+        token = self._get_token()
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=120)
+        resp.raise_for_status()
+        return resp.content
+
+    def _extract_last_frame_b64(self, video_path: str):
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                tmp_path = tmp.name
+            cmd = ["ffmpeg", "-y", "-sseof", "-0.1", "-i", video_path,
+                   "-vframes", "1", "-q:v", "2", tmp_path]
+            result = subprocess.run(cmd, capture_output=True, timeout=15)
+            if result.returncode == 0:
+                with open(tmp_path, "rb") as f:
+                    return base64.b64encode(f.read()).decode()
+        except Exception as e:
+            log.warning("Could not extract last frame: %s", e)
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+        return None
