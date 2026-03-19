@@ -128,3 +128,40 @@ class VeoGenerator:
                             uri = item.get("gcsUri") or item.get("uri")
                             if uri:
                                 return self._download_gcs(uri)
+
+                log.error("Unexpected response structure: %s", str(data)[:500])
+                raise RuntimeError("Could not extract video from Veo response")
+
+            interval = min(interval + 10, 30)
+
+        raise TimeoutError(f"Veo timed out after {max_wait}s")
+
+    def _download_gcs(self, gcs_uri: str) -> bytes:
+        """Download video from gs:// URI using authenticated request."""
+        # Convert gs://bucket/path to https
+        path = gcs_uri.replace("gs://", "")
+        bucket, obj = path.split("/", 1)
+        url = f"https://storage.googleapis.com/{bucket}/{obj}"
+        token = self._get_token()
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=120)
+        resp.raise_for_status()
+        return resp.content
+
+    def _extract_last_frame_b64(self, video_path: str):
+        try:
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                tmp_path = tmp.name
+            cmd = ["ffmpeg", "-y", "-sseof", "-0.1", "-i", video_path,
+                   "-vframes", "1", "-q:v", "2", tmp_path]
+            result = subprocess.run(cmd, capture_output=True, timeout=15)
+            if result.returncode == 0:
+                with open(tmp_path, "rb") as f:
+                    return base64.b64encode(f.read()).decode()
+        except Exception as e:
+            log.warning("Could not extract last frame: %s", e)
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+        return None
